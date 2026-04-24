@@ -1,0 +1,310 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath, amssymb}
+\usepackage{bm}
+\usepackage{booktabs}
+
+\title{Basketball Trajectory Reconstruction and Prediction: Methodology Notes from My Project Journey}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\section{Overview}
+This document summarizes the methods used in my basketball analysis pipeline to transform noisy basketball detections into a stable two-dimensional trajectory and then estimate future flight after release. To keep the methodology conceptually clear, the document is divided into two main parts:
+\begin{itemize}
+    \item \textbf{Trajectory Reconstruction:} recovering a stable observed ball path from noisy frame-wise detections, and
+    \item \textbf{Trajectory Prediction:} estimating future flight using pose cues and early post-release ball motion.
+\end{itemize}
+
+\section{Observation Model}
+For each frame $t$, the detector returns a bounding box and a confidence score:
+\begin{equation}
+    b_t = (x_{1,t}, y_{1,t}, x_{2,t}, y_{2,t}), \qquad c_t \in [0,1].
+\end{equation}
+The basketball center is computed as
+\begin{equation}
+    z_t = (x_t, y_t) =
+    \left(
+        \frac{x_{1,t} + x_{2,t}}{2},
+        \frac{y_{1,t} + y_{2,t}}{2}
+    \right).
+\end{equation}
+We treat $z_t$ as a noisy observation of the latent ball position. The overall goal is to recover a smooth trajectory
+\begin{equation}
+    \hat{\bm{p}}_t = (\hat{x}_t, \hat{y}_t)
+\end{equation}
+that is more stable than the raw detector output.
+
+\section{Part I: Trajectory Reconstruction}
+\subsection{Offline Smoothing Pipeline}
+The offline pipeline is implemented for post-processing detection CSV files.
+
+\subsection{Confidence Filtering}
+Low-confidence observations are rejected before any geometric processing:
+\begin{equation}
+    z_t \text{ is valid only if } c_t \ge \tau_c,
+\end{equation}
+where $\tau_c$ is a user-defined confidence threshold.
+
+\subsection{Jump Rejection}
+To suppress false positives and sudden detector jumps, we compute the Euclidean distance between consecutive observations:
+\begin{equation}
+    d_t = \left\| z_t - z_{t-1} \right\|_2
+    = \sqrt{(x_t-x_{t-1})^2 + (y_t-y_{t-1})^2}.
+\end{equation}
+If
+\begin{equation}
+    d_t > \tau_d,
+\end{equation}
+the point is treated as an outlier or as the beginning of a new trajectory segment.
+
+\subsection{Short-Gap Interpolation}
+If the ball is missing for only a small number of frames, the gap is filled by linear interpolation. Suppose $z_t$ and $z_{t+k}$ are valid observations and frames $t+1,\dots,t+k-1$ are missing. Then for $i=1,\dots,k-1$:
+\begin{equation}
+    x_{t+i} = x_t + \frac{i}{k}(x_{t+k}-x_t),
+\end{equation}
+\begin{equation}
+    y_{t+i} = y_t + \frac{i}{k}(y_{t+k}-y_t).
+\end{equation}
+This step maintains short-term continuity without inventing long trajectory fragments.
+
+\subsection{Median Smoothing}
+To reduce detector jitter while remaining robust to outliers, we apply a rolling median filter over a local temporal window:
+\begin{equation}
+    \tilde{x}_t = \mathrm{median}\{x_{t-r}, \dots, x_{t+r}\},
+\end{equation}
+\begin{equation}
+    \tilde{y}_t = \mathrm{median}\{y_{t-r}, \dots, y_{t+r}\}.
+\end{equation}
+Compared with a moving average, the median filter is less sensitive to isolated detection spikes.
+
+\subsection{Trajectory Segmentation}
+The trajectory is divided into contiguous fragments whenever neighboring points are too far apart. Let $\tilde{z}_t = (\tilde{x}_t, \tilde{y}_t)$. We start a new segment if
+\begin{equation}
+    \left\| \tilde{z}_t - \tilde{z}_{t-1} \right\|_2 > \tau_s,
+\end{equation}
+where $\tau_s$ is a split-distance threshold.
+
+This avoids drawing a single curve through disconnected detections or false positives.
+
+\subsection{Polynomial Curve Fitting}
+Each sufficiently long trajectory segment is fitted independently. Since basketball motion in image space often appears approximately linear in the horizontal direction and approximately parabolic in the vertical direction, we use:
+\begin{equation}
+    \hat{x}(t) = a_1 t + b_1,
+\end{equation}
+\begin{equation}
+    \hat{y}(t) = a_2 t^2 + b_2 t + c_2.
+\end{equation}
+The coefficients are estimated by least squares:
+\begin{equation}
+    \min_{a_1,b_1} \sum_t \left(x_t - (a_1 t + b_1)\right)^2,
+\end{equation}
+\begin{equation}
+    \min_{a_2,b_2,c_2} \sum_t \left(y_t - (a_2 t^2 + b_2 t + c_2)\right)^2.
+\end{equation}
+
+\subsection{Online Smoothing Pipeline}
+For live camera display, future frames are unavailable, so the offline interpolation and centered-window filtering cannot be used directly. Instead, we maintain an online state with position and velocity:
+\begin{equation}
+    \bm{s}_t = (x_t, y_t, v_{x,t}, v_{y,t}).
+\end{equation}
+
+\subsection{Prediction Step}
+Under a constant-velocity assumption, the predicted position is
+\begin{equation}
+    x_t^- = x_{t-1} + v_{x,t-1},
+\end{equation}
+\begin{equation}
+    y_t^- = y_{t-1} + v_{y,t-1}.
+\end{equation}
+
+\subsection{Measurement Update}
+If a new measurement $z_t = (x_t^{(m)}, y_t^{(m)})$ is available, we blend it with the prediction using exponential smoothing:
+\begin{equation}
+    \hat{x}_t = \alpha x_t^{(m)} + (1-\alpha)x_t^-,
+\end{equation}
+\begin{equation}
+    \hat{y}_t = \alpha y_t^{(m)} + (1-\alpha)y_t^-,
+\end{equation}
+where $\alpha \in (0,1]$ controls how strongly the tracker trusts the new detection.
+
+\subsection{Velocity Update}
+The velocity is updated from the change in the smoothed position:
+\begin{equation}
+    v_{x,t} = \beta(\hat{x}_t - \hat{x}_{t-1}) + (1-\beta)v_{x,t-1},
+\end{equation}
+\begin{equation}
+    v_{y,t} = \beta(\hat{y}_t - \hat{y}_{t-1}) + (1-\beta)v_{y,t-1},
+\end{equation}
+where $\beta \in (0,1]$ determines the amount of velocity smoothing.
+
+\subsection{Missing Measurements}
+If the ball is temporarily not detected, the system extrapolates from the previous state:
+\begin{equation}
+    \hat{x}_t = \hat{x}_{t-1} + v_{x,t-1},
+\end{equation}
+\begin{equation}
+    \hat{y}_t = \hat{y}_{t-1} + v_{y,t-1}.
+\end{equation}
+After too many consecutive missing frames, the track is reset to avoid drifting indefinitely.
+
+\section{Part II: Trajectory Prediction}
+In addition to reconstructing the observed ball path, the combined live pipeline also estimates a projected future trajectory. This prediction module is not a learned model; instead, it combines human pose, ball-hand interaction, temporal motion estimation, and short-horizon ballistic fitting in the image plane.
+
+\subsection{Overview}
+The prediction pipeline operates in three stages:
+\begin{enumerate}
+    \item \textbf{Pose-based preview:} while the ball is still near the shooting hand, the system estimates a provisional launch direction and speed from arm pose and wrist motion.
+    \item \textbf{Release locking:} when a release event is detected, the system selects a representative release frame and freezes the trajectory estimate.
+    \item \textbf{Early-flight refinement:} after release, the first few observed ball positions are used to refine the launch velocity and gravity through least-squares ballistic fitting.
+\end{enumerate}
+
+\subsection{Pose Representation}
+We use the detected shoulder, elbow, and wrist of the shooting arm:
+\[
+    \bm{s} \in \mathbb{R}^2, \qquad
+    \bm{e} \in \mathbb{R}^2, \qquad
+    \bm{w} \in \mathbb{R}^2.
+\]
+In addition, a torso center is derived from shoulder and hip midpoints to capture global body motion. The shooting side is selected either by the wrist closest to the detected ball or, when ball evidence is weak, by the arm with stronger recent motion.
+
+\subsection{Geometric Features}
+Two arm-based geometric features are extracted.
+
+\paragraph{Elbow angle.}
+The elbow angle is defined by
+\begin{equation}
+    \theta_{\text{elbow}}
+    =
+    \cos^{-1}
+    \left(
+    \frac{
+    (\bm{s}-\bm{e})^\top (\bm{w}-\bm{e})
+    }{
+    \|\bm{s}-\bm{e}\|_2 \, \|\bm{w}-\bm{e}\|_2
+    }
+    \right).
+\end{equation}
+
+\paragraph{Forearm release angle.}
+Let the forearm direction be
+\begin{equation}
+    \bm{f} = \bm{w} - \bm{e}.
+\end{equation}
+The release angle relative to the horizontal axis is
+\begin{equation}
+    \theta_{\text{release}} = \operatorname{atan2}(-f_y, f_x),
+\end{equation}
+where the sign change compensates for the image-coordinate convention in which the vertical axis increases downward.
+
+\subsection{Temporal Motion Estimation}
+Recent wrist and torso positions are tracked over a short temporal window. Given two samples at times $t_1$ and $t_2$, the image-plane velocity is approximated by
+\begin{equation}
+    v_x = \frac{x_2 - x_1}{t_2 - t_1},
+    \qquad
+    v_y = \frac{y_2 - y_1}{t_2 - t_1},
+\end{equation}
+with speed magnitude
+\begin{equation}
+    \|\bm{v}\|_2 = \sqrt{v_x^2 + v_y^2}.
+\end{equation}
+For video input, timestamps are derived from the video time axis rather than wall-clock runtime so that motion estimates remain stable even when inference speed varies.
+
+\subsection{Pose-Based Launch Estimation}
+Before release, a provisional launch direction is obtained by blending three normalized cues:
+\begin{itemize}
+    \item forearm direction,
+    \item arm direction from shoulder to wrist,
+    \item wrist velocity direction.
+\end{itemize}
+Let these normalized directions be denoted by $\hat{\bm{d}}_f$, $\hat{\bm{d}}_a$, and $\hat{\bm{d}}_v$. The fused launch direction is
+\begin{equation}
+    \hat{\bm{d}}
+    =
+    \frac{
+        0.5\hat{\bm{d}}_f + 0.3\hat{\bm{d}}_a + 0.2\hat{\bm{d}}_v
+    }{
+        \left\|0.5\hat{\bm{d}}_f + 0.3\hat{\bm{d}}_a + 0.2\hat{\bm{d}}_v\right\|_2
+    }.
+\end{equation}
+
+The launch speed is initialized from wrist speed and modulated by an elbow-extension factor:
+\begin{equation}
+    v_0 = \|\bm{v}_{\text{wrist}}\|_2 \cdot \alpha(\theta_{\text{elbow}}) \cdot \beta,
+\end{equation}
+where $\alpha(\theta_{\text{elbow}})$ increases as the arm approaches full extension and $\beta$ is a tunable scale factor used to compensate for the systematic underestimation of ball speed from pose motion alone. The corresponding initial velocity vector is
+\begin{equation}
+    \bm{v}_0 = v_0 \hat{\bm{d}}.
+\end{equation}
+
+\subsection{Release Detection and Candidate Selection}
+Release is not determined from a single frame only. While the ball remains near the hand, candidate release frames are buffered. Each candidate is scored from a combination of wrist speed, release angle, and elbow extension. When release is confirmed, the trajectory is locked using the best candidate from this short temporal window rather than the current frame. This reduces the lag introduced by noisy framewise release decisions.
+
+\subsection{Ballistic Trajectory Model}
+Trajectory prediction is carried out in the 2D image plane with a constant-acceleration ballistic model:
+\begin{equation}
+    x(t) = x_0 + v_{x0} t,
+\end{equation}
+\begin{equation}
+    y(t) = y_0 + v_{y0} t + \frac{1}{2} g t^2.
+\end{equation}
+Here, $(x_0, y_0)$ is the launch point in image coordinates, $(v_{x0}, v_{y0})$ is the initial velocity in pixels per second, and $g$ is an image-space gravity parameter in pixels per second squared. This is therefore a 2D approximation for visual prediction rather than a fully calibrated 3D physical simulator.
+
+\subsection{Early-Flight Refinement}
+A pure pose-based launch estimate tends to underestimate true ball speed. To reduce this bias, the first few post-release ball observations are used to refine the trajectory. Given samples
+\[
+    \{(t_i, x_i, y_i)\}_{i=1}^{N},
+\]
+the horizontal motion is modeled by
+\begin{equation}
+    x_i \approx x_0 + v_{x0} t_i,
+\end{equation}
+while the vertical motion is modeled by
+\begin{equation}
+    y_i \approx y_0 + v_{y0} t_i + \frac{1}{2} g t_i^2.
+\end{equation}
+
+If gravity is fixed, least squares is used to estimate $x_0$, $v_{x0}$, $y_0$, and $v_{y0}$. If gravity is also fitted, the vertical motion is written as
+\begin{equation}
+    y_i \approx a + b t_i + c\left(\frac{1}{2} t_i^2\right),
+\end{equation}
+with
+\[
+    a = y_0, \qquad b = v_{y0}, \qquad c = g.
+\]
+The resulting gravity estimate is clipped to a plausible range in order to suppress unstable solutions caused by detector noise. After fitting, the refined launch state replaces the pose-only estimate and the remaining trajectory is rendered from the fitted parameters.
+
+\subsection{Interpretation}
+The resulting prediction module is best interpreted as a hybrid estimator:
+\begin{itemize}
+    \item before release, it produces a pose-driven preview of the anticipated path,
+    \item at release, it locks onto the best release-frame estimate,
+    \item immediately after release, it improves the prediction using the earliest observed portion of the true ball flight.
+\end{itemize}
+Therefore, the system does not claim purely pre-release prediction of the entire trajectory. Instead, it estimates launch conditions from pose and then refines them using a short observable segment of the actual flight.
+
+\section{Rendering}
+The live renderer does not recompute the entire trajectory each frame. Instead, it stores the accepted smoothed points and draws only the newest line segment:
+\begin{equation}
+    \ell_t = \overline{\hat{\bm{p}}_{t-1}\hat{\bm{p}}_t}.
+\end{equation}
+This incremental drawing strategy significantly reduces rendering cost for real-time use.
+
+\section{Why the Method Works}
+The pipeline is effective because it combines several complementary ideas:
+\begin{itemize}
+    \item confidence filtering removes clearly unreliable detections,
+    \item distance-based rejection suppresses implausible jumps,
+    \item interpolation repairs short detector failures,
+    \item median filtering reduces jitter while remaining robust to outliers,
+    \item segment-wise fitting avoids forcing one curve through disconnected motion,
+    \item online exponential smoothing provides a causal approximation for real-time use.
+\end{itemize}
+
+\section{Summary}
+In short, the \texttt{smooth\_curve} pipeline is not a full physical simulator. Instead, it is a practical trajectory reconstruction system that maps noisy detector outputs into a stable, visually coherent, and learning-friendly ball trajectory. This makes it suitable both for real-time display and for later downstream tasks such as release detection and trajectory prediction.
+
+\end{document}

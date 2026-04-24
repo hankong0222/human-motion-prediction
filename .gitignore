@@ -1,0 +1,38 @@
+venv/
+__pycache__/
+*.py[cod]
+
+# Local environment and notebook noise
+.ipynb_checkpoints/
+.DS_Store
+Thumbs.db
+
+# Model weights and large binaries
+*.pth
+*.onnx
+*.engine
+
+# Generated training and inference outputs
+runs/
+
+# Raw media and mined hard-example artifacts
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.m4v
+*.mpg
+*.mpeg
+*.jpg
+*.jpeg
+*.png
+data/hard_examples/
+data/raw/
+
+# Optional dataset exports
+*.ndjson
+*.csv
+*.xlsx
+
+# Keep small local configs in repo
+!data/*.yaml
